@@ -1,0 +1,32 @@
+# Survey data and results
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+*.csv
+*.tsv
+
+# Local environment
+.env
+.env.*
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Jupyter temporary files
+.ipynb_checkpoints/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+~$*
+logs/
+data/
+output/
+debug/
+
+# IDE settings
+.vscode/
+.idea/
