@@ -335,7 +335,8 @@ def render_header(home: bool = True) -> None:
     mode = 'bm-home' if home else 'bm-compact'
     header_html=f'<section class="bm-hero {mode}">{inner}</section>' if home else ''
     st.html(f"""<style>
-      @import url('https://fonts.googleapis.com/css2?family=Jua&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=Jua&family=Noto+Sans+KR:wght@400;500;600;700;800&display=swap');
+      html,body,[data-testid="stAppViewContainer"],[data-testid="stSidebar"]{{font-family:'Noto Sans KR','Malgun Gothic',sans-serif}}
       [data-testid="stAppViewContainer"]{{background:linear-gradient(180deg,#e3f8f6,#f6fcfb 310px,#fff 690px)}}
       [data-testid="stHeader"]{{background:transparent}}
       .block-container{{max-width:1480px!important;padding-top:1.05rem!important;padding-bottom:1.4rem!important}}
@@ -369,6 +370,7 @@ def render_header(home: bool = True) -> None:
     box-shadow:0 6px 17px #10a79b3d!important
 }}
       .bm-big-number{{font-size:clamp(42px,5vw,65px);color:#098e88;font-weight:800}}
+      .st-key-excel_home button{{min-height:46px!important}}
       @media(max-width:720px){{.bm-hero.bm-home{{height:124px;padding:10px 15px 0}}.bm-hero img{{height:115px!important}}.bm-hero h1{{font-size:26px}}.bm-panel{{padding:13px}}}}
     </style>{header_html}""")
 
@@ -377,7 +379,7 @@ def format_elapsed(status: dict) -> str:
     """00m 00s until one hour, then 1h 00m 00s; stop at end time."""
     started = status.get('started_at')
     if not started:
-        return '00m 00s'
+        return '00m 00s 00'
     try:
         start = datetime.fromisoformat(started)
         if status.get('state') in ('completed', 'interrupted', 'failed'):
@@ -387,10 +389,10 @@ def format_elapsed(status: dict) -> str:
             end = datetime.now()
         seconds = max(0, int((end-start).total_seconds()))
     except (ValueError, TypeError):
-        return '00m 00s'
+        return '00m 00s 00'
     hours, rem = divmod(seconds, 3600)
     minutes, seconds = divmod(rem, 60)
-    return f'{hours}h {minutes:02d}m {seconds:02d}s' if hours else f'{minutes:02d}m {seconds:02d}s'
+    return f'{hours}h {minutes:02d}m {seconds:02d}s 00' if hours else f'{minutes:02d}m {seconds:02d}s 00'
 
 
 def job_progress(status: dict, config: dict) -> tuple[int,int,float]:
@@ -439,13 +441,13 @@ def render_mini_progress(status: dict,config: dict) -> None:
     </div>""")
 
 def render_progress(total: int, processed: int, saved: int, progress: float, state: str, elapsed: str='00m 00s', started_at: str='', ended_at: str='') -> None:
-    pct = max(0.,min(100.,progress*100)); title, sub, name = progress_stage(pct,state)
+    pct = max(0.,min(100.,progress*100)); title, _, name = progress_stage(pct,state)
     rider = art_img(name,'width:70px;height:75px;object-fit:contain;','진행률 배민 라이더')
     badge = '완료' if state=='completed' else ('중단' if state in ('failed','interrupted') else '조사 중')
     start = json.dumps(str(started_at).replace(' ','T')); end = json.dumps(str(ended_at).replace(' ','T'))
     active = 'true' if state in ('starting','running') else 'false'
     page = f"""<!doctype html><html lang="ko"><meta charset="UTF-8"><style>
-      *{{box-sizing:border-box}}body{{margin:0;font-family:'Malgun Gothic',sans-serif;color:#193b38}}
+      *{{box-sizing:border-box}}body{{margin:0;font-family:'Noto Sans KR','Malgun Gothic',sans-serif;color:#193b38}}
       .card{{height:339px;border:0;border-radius:18px;background:#fff;padding:21px 23px;box-shadow:0 5px 17px rgba(13,108,110,.075)}}
       .top,.labels,.foot{{display:flex;align-items:center;justify-content:space-between;gap:12px}}
       .top{{font-size:19px;font-weight:750}}.badge{{font-size:12px;color:#0c8f88;background:#e5f7f4;padding:6px 12px;border-radius:30px}}
@@ -453,14 +455,14 @@ def render_progress(total: int, processed: int, saved: int, progress: float, sta
       .time{{font-size:13px;color:#899c9b;text-align:center;margin-top:10px}}.labels{{margin-top:14px}}
       .lane{{position:relative;height:83px;border-bottom:1px dashed #d5e9e6;margin-top:6px}}
       .track{{height:12px;background:#e1efed;border-radius:20px;overflow:hidden}}.fill{{height:100%;background:linear-gradient(90deg,#62dfd6,#11b6ad);border-radius:20px}}
-      .foot{{font-size:12px;color:#718c88;margin-top:12px}}.stage{{font-weight:700}}.sub{{font-size:11px;color:#6a8784}}
+      .foot{{font-size:12px;color:#718c88;margin-top:12px}}.stage{{font-weight:700}}
     </style><div class="card"><div class="top"><span>실시간 조사 현황</span><span class="badge">{escape(badge)}</span></div>
     <div class="percent">{pct:.1f}<span style="font-size:.43em">%</span></div><div class="time" id="bm-timer">{escape(elapsed)}</div>
-    <div class="labels"><span class="stage">{escape(title)}</span><span class="sub">{escape(sub)}</span></div>
+    <div class="labels"><span class="stage">{escape(title)}</span></div>
     <div class="lane"><div style="position:absolute;bottom:0;left:clamp(0px,calc({pct:.2f}% - 35px),calc(100% - 70px));width:70px;height:75px">{rider}</div></div>
     <div class="track"><div class="fill" style="width:{pct:.2f}%"></div></div>
     <div class="foot"><span>완료 {processed:,}</span><span>남은 대상 {max(0,total-processed):,}</span><span>전체 {total:,}</span></div></div>
-    <script>const t0={start},t1={end},isRun={active};function tick(){{if(!t0)return;const s=Date.parse(t0),e=isRun?Date.now():Date.parse(t1||t0);if(!Number.isFinite(s)||!Number.isFinite(e))return;let n=Math.max(0,Math.floor((e-s)/1000)),h=Math.floor(n/3600),m=Math.floor(n%3600/60),sec=n%60,p=x=>String(x).padStart(2,'0');document.getElementById('bm-timer').textContent=h?`${{h}}h ${{p(m)}}m ${{p(sec)}}s`:`${{p(m)}}m ${{p(sec)}}s`}}tick();setInterval(tick,1000)</script></html>"""
+    <script>const t0={start},t1={end},isRun={active};function tick(){{if(!t0)return;const s=Date.parse(t0),e=isRun?Date.now():Date.parse(t1||t0);if(!Number.isFinite(s)||!Number.isFinite(e))return;let ms=Math.max(0,e-s),n=Math.floor(ms/1000),h=Math.floor(n/3600),m=Math.floor(n%3600/60),sec=n%60,cs=Math.floor(ms%1000/10),p=x=>String(x).padStart(2,'0');document.getElementById('bm-timer').textContent=h?`${{h}}h ${{p(m)}}m ${{p(sec)}}s ${{p(cs)}}`:`${{p(m)}}m ${{p(sec)}}s ${{p(cs)}}`}}tick();setInterval(tick,50)</script></html>"""
     component_html(page,height=346,scrolling=False)
 
 
@@ -491,14 +493,15 @@ def render_review_heading(count: int):
     """)
 
 
-def render_download_heading():
-    image = art_img('download.png','height:136px;max-width:185px;object-fit:contain;', '확성기 배민')
-    st.html(f"""
-      <div class="bm-panel" style="display:flex;justify-content:space-between;align-items:center;padding-top:8px;padding-bottom:8px;gap:12px;">
-        <div><div class="bm-font" style="font-size:21px;color:#185c57">Excel 결과가 준비됐어요!</div>
-        <div class="bm-caption">아래에서 Excel 파일을 내려받을 수 있어요.</div></div>{image}
-      </div>
-    """)
+def render_download_heading(ready: bool = True):
+    """Always render the same-height Excel card to avoid a shifting download button."""
+    image = art_img('download.png',f'height:136px;max-width:185px;object-fit:contain;opacity:{1 if ready else .35};','확성기 배민')
+    heading = 'Excel 결과가 준비됐어요!' if ready else '조사가 끝나면 Excel 결과를 받을 수 있어요.'
+    caption = '아래에서 Excel 파일을 내려받을 수 있어요.' if ready else '조사 완료 후 다운로드 버튼이 활성화됩니다.'
+    st.html(f"""<div class="bm-panel" style="box-sizing:border-box;height:160px;min-height:160px;max-height:160px;display:flex;justify-content:space-between;align-items:center;padding:8px 20px;gap:12px;overflow:hidden">
+        <div style="min-width:0;flex:1"><div class="bm-font" style="font-size:21px;line-height:1.35;color:#185c57">{heading}</div>
+        <div class="bm-caption" style="margin-top:7px">{caption}</div></div>{image}
+      </div>""")
 
 
 def survey_result_path(job_dir: Path | None, survey: dict | None=None) -> Path | None:
@@ -611,12 +614,9 @@ def render_home(job_dir: Path | None):
                 st.session_state['bm_nav_pending']='사람 확인'
                 st.rerun()
 
-            if result_file and state in ('completed','failed','interrupted'):
-                render_download_heading()
-                st.download_button('Excel 결과 다운로드',data=result_file.read_bytes(),file_name=result_file.name,mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',type='primary',icon=':material/download:',width='stretch',key='excel_home')
-            else:
-                st.html('<div class="bm-panel" style="padding:15px;font-size:13px;color:#6a8985">조사가 끝나면 Excel 결과를 받을 수 있어요.</div>')
-                st.download_button('Excel 결과 다운로드',data=b'',file_name='result.xlsx',disabled=True,icon=':material/download:',width='stretch',key='excel_home_disabled')
+            excel_ready=bool(result_file and state in ('completed','failed','interrupted'))
+            render_download_heading(ready=excel_ready)
+            st.download_button('Excel 결과 다운로드',data=result_file.read_bytes() if excel_ready else b'',file_name=result_file.name if excel_ready else 'result.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',type='primary',disabled=not excel_ready,icon=':material/download:',width='stretch',key='excel_home')
 
     st.markdown('**최근 실행 로그**')
     log=tail_log(job_dir/'survey.log',max_lines=65,max_bytes=25000) if job_dir else '조사를 시작하면 실행 기록이 표시됩니다.'
@@ -1002,7 +1002,7 @@ NAV_MAP={'🛵 조사 현황':'Home','⚙️ 조사 설정':'Settings','📊 조
 if 'bm_nav_pending' in st.session_state:
     pending=st.session_state.pop('bm_nav_pending'); st.session_state['bm_nav']=NAV_MAP.get(pending,pending)
 if st.session_state.get('bm_nav') not in ('Home','Settings','Results','사람 확인','상세 로그'): st.session_state['bm_nav']='Home'
-page=st.session_state['bm_nav']; CONTACT_EMAIL=''  # Add your email here to enable its link.
+page=st.session_state['bm_nav']; CONTACT_EMAIL=os.environ.get('BAEMIN_CONTACT_EMAIL','').strip()
 
 if 'bm_side_compact' not in st.session_state: st.session_state['bm_side_compact']=False
 small=st.session_state['bm_side_compact']
@@ -1011,20 +1011,24 @@ side_width=74 if small else 244
 st.html(f"""<style>
 section[data-testid="stSidebar"]{{width:{side_width}px!important;min-width:{side_width}px!important;max-width:{side_width}px!important}}
 section[data-testid="stSidebar"],section[data-testid="stSidebar"]>div{{background:#0b2030!important;color:#dce8ee!important}}
-section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"]{{padding:8px 11px!important}}
+section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"]{{padding:0 11px!important}}
 section[data-testid="stSidebar"] .stButton button{{display:flex!important;justify-content:flex-start!important;align-items:center!important;gap:11px!important;min-height:41px!important;padding:0 12px!important;border:0!important;border-radius:8px!important;box-shadow:none!important;font-size:13px!important;color:#bbced8!important}}
 section[data-testid="stSidebar"] .stButton button[kind="tertiary"]{{background:transparent!important}}
-section[data-testid="stSidebar"] .stButton button[kind="primary"]{{background:{'#123244' if small else '#24495f'}!important;color:white!important;box-shadow:inset 3px 0 #36d4c6!important}}
+section[data-testid="stSidebar"] .stButton button[kind="primary"]{{background:{'#123244' if small else '#24495f'}!important;color:white!important;box-shadow:{'none' if small else 'inset 3px 0 #36d4c6'}!important}}
 section[data-testid="stSidebar"] .stButton button:hover{{background:#1a3b50!important;color:white!important}}
 section[data-testid="stSidebar"] .stButton button p{{text-align:left!important;margin:0!important}}
 section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"]{{display:none!important}}
 .st-key-bm_results_sub{{border-left:1px solid #375267;margin-left:{'0' if small else '15px'};padding-left:{'0' if small else '9px'}}}
-.bm-side-logo{{padding:3px 1px 10px;display:flex;align-items:center;gap:10px;justify-content:{'center' if small else 'flex-start'};min-height:{'42px' if small else '64px'}}}
-.bm-side-logo img{{max-width:100%;width:{'38px' if small else '54px'};max-height:{'42px' if small else '58px'};object-fit:contain}}.bm-side-brand{{font-size:18px;font-weight:850;letter-spacing:.05em;color:#f3fffe}}
+.bm-side-logo{{padding:1px 1px 12px;display:flex;align-items:center;gap:10px;justify-content:{'center' if small else 'flex-start'};min-height:{'40px' if small else '58px'}}}
+.bm-side-logo img{{max-width:100%;width:{'32px' if small else '40px'};max-height:{'36px' if small else '44px'};object-fit:contain}}.bm-side-brand{{font-size:23px;font-weight:850;letter-spacing:.055em;color:#f3fffe}}
 .bm-side-category{{font-size:10px;font-weight:700;letter-spacing:.14em;color:#8ba5b1;margin:13px 8px 7px}}
 .bm-side-footer{{position:fixed;bottom:22px;left:{'17px' if small else '24px'};display:flex;gap:19px}}
 .bm-side-footer a{{color:#aebfcc;text-decoration:none;font-size:12px;display:flex;align-items:center;gap:6px}}
 .bm-side-footer svg{{width:16px;height:16px}}
+.st-key-sidebar_toggle{{display:flex;justify-content:flex-end;margin-top:0!important;margin-bottom:-2px!important}}
+section[data-testid="stSidebar"] .st-key-sidebar_toggle button{{width:29px!important;min-height:28px!important;height:28px!important;padding:0!important;justify-content:center!important}}
+.st-key-sidebar_toggle button p{{display:none!important}}
+{'section[data-testid="stSidebar"] .stButton button{justify-content:center!important;padding:0!important;position:relative!important}section[data-testid="stSidebar"] .stButton button[kind="primary"]::after{content:"";position:absolute;right:5px;top:5px;width:5px;height:5px;border-radius:50%;background:#36d4c6}' if small else ''}
 {'section[data-testid="stSidebar"] .stButton button p,.bm-side-category,.bm-side-footer span{display:none!important}' if small else ''}
 </style>""")
 
@@ -1095,4 +1099,29 @@ else:
         elif page=='상세 로그': render_logs_page(current)
     detail_live()
 
-if page!='Home': st.html('<div style="text-align:center;margin:20px 0 8px;color:#87a49f;font-size:10px;letter-spacing:.17em">BAEMIN DELIVERY FEE SURVEY</div>')
+def render_site_footer(home: bool) -> None:
+    """Minimal site-wide links; email appears only when configured locally."""
+    email_link = (f'<a href="mailto:{escape(CONTACT_EMAIL,quote=True)}">이메일</a>' if CONTACT_EMAIL else '<span title="이메일 주소를 설정하면 활성화됩니다" style="opacity:.48">이메일 (준비 중)</span>')
+    brand = '' if home else '<div class="bm-footer-brand">BAEMIN DELIVERY FEE SURVEY</div>'
+    st.html(f"""<footer class="bm-site-footer">
+      {brand}
+      <div class="bm-footer-links">
+        <a href="https://mods.go.kr/" target="_blank" rel="noopener noreferrer">국가데이터처</a>
+        <span class="bm-footer-dot">·</span>
+        <a href="https://github.com/shinwltn/baemin-delivery-fee-automation" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <span class="bm-footer-dot">·</span>{email_link}
+      </div>
+      <div class="bm-footer-note">개인 제작 도구 · 외부 사이트 링크는 공식 제휴를 의미하지 않습니다.</div>
+    </footer>
+    <style>
+      .bm-site-footer{{box-sizing:border-box;border-top:1px solid #dfeeea;padding:20px 12px 13px;margin:32px 0 0;text-align:center;font-family:'Noto Sans KR','Malgun Gothic',sans-serif}}
+      .bm-footer-brand{{font-size:10px;letter-spacing:.17em;color:#87a49f;margin:0 0 14px}}
+      .bm-footer-links{{display:flex;gap:15px;align-items:center;justify-content:center;flex-wrap:wrap;color:#587774;font-size:12px}}
+      .bm-footer-links a{{color:#426d69;text-decoration:none;font-weight:600}}
+      .bm-footer-links a:hover{{color:#059f96;text-decoration:underline}}
+      .bm-footer-dot{{color:#c1d6d2}}
+      .bm-footer-note{{font-size:10px;color:#9ab0ab;margin-top:12px}}
+    </style>""")
+
+
+render_site_footer(home=page=='Home')
