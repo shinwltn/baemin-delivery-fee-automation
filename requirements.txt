@@ -1,2 +1,4 @@
 uiautomator2
 openpyxl
+streamlit
+Pillow
