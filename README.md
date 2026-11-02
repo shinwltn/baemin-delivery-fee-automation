@@ -8,9 +8,23 @@
 
 ---
 
+## Streamlit 대시보드 실행 (Windows)
+
+기존 Jupyter 실행 방식 외에 Streamlit 웹 UI를 제공합니다.
+
+1. `python -m pip install -r requirements.txt` 로 의존성을 설치합니다.
+2. 프로젝트 폴더 바깥의 `배민_ui_png/` 폴더에 UI용 PNG 캐릭터 파일을 놓거나, 프로젝트 내부 `assets/` 에 넣습니다. **이미지는 코드와 별도이며, GitHub에 없는 경우 캐릭터가 표시되지 않습니다.**
+3. BlueStacks 5에서 배달의민족 로그인과 ADB 설정을 준비합니다.
+4. `python -m streamlit run app.py` 를 실행합니다.
+5. Settings에서 새 조사표 업로드 → 대상 미리보기 → 실제 조사 시작 또는 기존 작업 이어하기를 선택합니다.
+
+기능: Home 진행률·경과 시간·안전 중단, Results Excel 결과 조회·다운로드, 사람 확인 검토 목록, 실시간·전체 상세 로그. 안전 중단은 엔진의 Excel 저장 완료 로그가 나온 후 적용되며 즉시 종료가 아닙니다.
+
+> 주의: **실제 조사 중인 컴퓨터의 로컬 파일을 ChatGPT가 직접 Git에 동기화할 수는 없습니다.** 조사 Excel, 개인정보, 로그, 실행 기록은 GitHub에 올리지 마세요. 작업 상태 JSON은 현장 파일이 최종 기준입니다.
+
 ## 🚀 Quick Start | 자동조사 실행 방법
 
-> **실제 조사는 `run_survey.ipynb`에서 실행합니다.**
+> **Jupyter로 실행할 때는 `run_survey.ipynb`, 웹 화면으로 실행할 때는 `app.py`를 사용합니다.**
 >
 > `baemin_survey.py`는 조사 함수가 구현된 Python 모듈입니다. 사용자는 핵심 코드를 직접 수정하지 않고, **실행 노트북에서 조사 조건만 입력**하면 됩니다.
 
@@ -284,6 +298,8 @@ run_survey(
 ```text
 baemin-delivery-fee-automation/
 ├── baemin_survey.py
+├── app.py                         # Streamlit UI
+├── streamlit_worker.py            # 별도 조사 실행기
 ├── run_survey_template.ipynb
 ├── baemin_delivery_fee_survey.ipynb
 ├── README.md
