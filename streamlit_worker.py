@@ -8,9 +8,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 import uuid
-import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -21,18 +21,58 @@ def timestamp() -> str:
 
 
 def save_json(path: Path, obj: dict) -> None:
+    """Write status atomically; tolerate transient Windows file-scanner locks."""
+    content = json.dumps(obj, ensure_ascii=False, indent=2)
     temporary = path.with_name(f"{path.stem}.{uuid.uuid4().hex}.writing")
     try:
-        temporary.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.write_text(content, encoding="utf-8")
         for attempt in range(8):
             try:
                 os.replace(temporary, path)
                 return
             except PermissionError:
-                if attempt == 7: raise
+                if attempt == 7:
+                    raise
                 time.sleep(.12 * (attempt + 1))
     finally:
         temporary.unlink(missing_ok=True)
+
+
+GROUP_REGIONS = {
+    1: {"경기"}, 2: {"서울", "강원", "인천"},
+    3: {"경남", "전남", "제주"}, 4: {"경북", "충북", "세종"},
+    5: {"부산", "광주", "대구", "울산"}, 6: {"전북", "충남", "대전"},
+}
+
+
+def previous_group_counts(config: dict) -> tuple[int, int]:
+    """Read DONE records: (selected completed, completed outside chosen groups)."""
+    if config.get("mode") not in ("조합", "전체"):
+        return 0, 0
+    output = Path(config.get("expected_result_file") or "")
+    if not output.is_file():
+        return 0, 0
+    from openpyxl import load_workbook
+    book = load_workbook(output, read_only=True, data_only=True)
+    try:
+        if "자동조사진행" not in book.sheetnames:
+            return 0, 0
+        selected_groups = config.get("target") or []
+        selected = (set().union(*(GROUP_REGIONS.get(int(g), set()) for g in selected_groups))
+                    if config.get("mode") == "조합" else set().union(*GROUP_REGIONS.values()))
+        selected_done = outside_done = 0
+        sheet = book["자동조사진행"]
+        for record in sheet.iter_rows(min_row=2, max_col=4, values_only=True):
+            if len(record) < 4 or record[3] != "DONE":
+                continue
+            count = int(record[2] or 0)
+            if str(record[0]) in selected:
+                selected_done += count
+            else:
+                outside_done += count
+        return selected_done, outside_done
+    finally:
+        book.close()
 
 
 PROGRESS = re.compile(r"\[전체\s+(\d+)/(\d+)\s*\|\s*([\d.]+)%\]")
@@ -53,6 +93,20 @@ class LiveLog:
         self.status = status
         self.buffer = ""
         self.out = (job_dir / "survey.log").open("a", encoding="utf-8", buffering=1)
+        self.outside_done = int(status.get("outside_done", 0))
+
+    def _set_progress(self, global_count: int, engine_total: int) -> None:
+        selected_total = int(self.status.get("selected_total") or 0)
+        if self.status.get("mode") in ("조합", "전체"):
+            count = max(0, global_count - self.outside_done)
+            total = selected_total
+        else:
+            count = global_count
+            total = selected_total or engine_total
+        count = min(count, total) if total else count
+        self.status["processed"] = count
+        self.status["total"] = total
+        self.status["progress"] = min(1.0, count / max(total, 1))
 
     def write(self, data: str) -> int:
         data = str(data)
@@ -68,17 +122,13 @@ class LiveLog:
         match = PROGRESS.search(line)
         if match:
             count, total = int(match.group(1)), int(match.group(2))
-            self.status["processed"] = count
-            self.status["total"] = total
-            self.status["progress"] = min(1.0, count / max(total, 1))
+            self._set_progress(count, total)
             changed = True
 
         match = CHECKPOINT.search(line)
         if match:
             count, total = int(match.group(1)), int(match.group(2))
-            self.status["processed"] = count
-            self.status["total"] = total
-            self.status["progress"] = min(1.0, count / max(total, 1))
+            self._set_progress(count, total)
             changed = True
 
         match = PARTIAL_SAVE.search(line)
@@ -105,7 +155,8 @@ class LiveLog:
             try:
                 save_json(self.job_dir / "status.json", self.status)
             except PermissionError as exc:
-                self.out.write(f"[상태 파일 잠금] 다음 진행률 갱신에서 재시도: {exc}\n")
+                # Progress UI may temporarily be stale; never abort a real survey over JSON.
+                self.out.write(f"[상태 파일 잠금] 진행률 저장은 다음 갱신에서 재시도: {exc}\n")
 
         # 실제 조사 엔진이 Excel 저장을 완료한 이후 출력하는 로그만 안전 중단 지점으로 사용.
         # 1) 행/지역/대상처/주소/여러지역: '주소지 저장 완료: ...'
@@ -137,16 +188,23 @@ class LiveLog:
 def main(config_path: Path) -> None:
     job_dir = config_path.parent
     config = json.loads(config_path.read_text(encoding="utf-8"))
+    try:
+        selected_done, outside_done = previous_group_counts(config)
+    except Exception:
+        selected_done = outside_done = 0
+    selected_total = int(config["selected_total"])
     status = {
         "state": "running",
+        "mode": config.get("mode"),
+        "outside_done": outside_done,
         "pid": os.getpid(),
         "started_at": timestamp(),
         "updated_at": timestamp(),
         "selected_total": config["selected_total"],
         "total": config["selected_total"],
-        "processed": 0,
-        "saved": 0,
-        "progress": 0.0,
+        "processed": min(selected_total, selected_done),
+        "saved": min(selected_total, selected_done),
+        "progress": min(1.0, selected_done / max(selected_total, 1)),
         "last_message": "BlueStacks 연결 준비 중...",
         "output_file": config["expected_result_file"],
         "error": "",
@@ -174,6 +232,9 @@ def main(config_path: Path) -> None:
             preview_only=False,
         )
         status["state"] = "completed"
+        status["processed"] = selected_total
+        status["total"] = selected_total
+        status["progress"] = 1.0
         status["output_file"] = result.get("output_file", config["expected_result_file"])
         status["last_message"] = "조사 정상 종료. 결과 Excel을 확인하세요."
         print("===== 조사 정상 종료 =====")
@@ -191,6 +252,8 @@ def main(config_path: Path) -> None:
     finally:
         status["updated_at"] = timestamp()
         status["ended_at"] = timestamp()
+        # Closing the log after restoring stdout prevents an unhandled stop from
+        # being raised during the final log flush.
         sys.stdout, sys.stderr = standard_out, standard_err
         try:
             log.close()

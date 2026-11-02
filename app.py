@@ -235,6 +235,30 @@ def tail_log(path: Path, max_bytes: int = 60000, max_lines: int = 140) -> str:
     return "\n".join(content.decode("utf-8", errors="replace").splitlines()[-max_lines:]) or "(로그 대기 중)"
 
 
+def current_store_from_log(path: Path) -> str | None:
+    """UI-only: read the most recent actual store announced by survey_one().
+
+    The engine writes `===== 조사 시작 =====` followed by `대상처: NAME`.
+    Another engine log says `대상처: 3` for the number of stores at an address;
+    accepting the latter would cause the ticker to display a fake store name.
+    """
+    if not path.is_file():
+        return None
+    lines = tail_log(path, max_bytes=64000, max_lines=450).splitlines()
+    for pos in range(len(lines)-1, -1, -1):
+        if lines[pos].strip() != '===== 조사 시작 =====':
+            continue
+        for line in lines[pos+1:pos+9]:
+            name_match = re.match(r'^\s*대상처:\s*(.*?)\s*$', line)
+            if name_match:
+                name = name_match.group(1)
+                if name and not re.fullmatch(r'\d+\s*(?:개)?', name):
+                    return name[:70]
+                return None
+        return None
+    return None
+
+
 def review_rows(file: Path) -> list[dict]:
     book = load_workbook(file, read_only=True, data_only=True)
     try:
@@ -307,11 +331,17 @@ def image_uri(name: str, path_string: str, modified_ns: int) -> str:
     with Image.open(path_string) as source:
         pic = source.convert('RGBA'); pic.thumbnail((850, 850), Image.Resampling.LANCZOS)
         if name in RIGHT_FACING: pic = ImageOps.mirror(pic)
+        if name.startswith("scooter_"):
+            bounds = pic.getchannel("A").getbbox()
+            if bounds:
+                pic = pic.crop(bounds)
         if name == 'sidebar_logo.png':
             from PIL import ImageDraw
             for point in ((0, 0), (pic.width-1, 0), (0, pic.height-1), (pic.width-1, pic.height-1)):
                 r, g, b, a = pic.getpixel(point)
                 if a and min(r, g, b) >= 235: ImageDraw.floodfill(pic, point, (255, 255, 255, 0), thresh=28)
+            bounds = pic.getchannel('A').getbbox()
+            if bounds: pic = pic.crop(bounds)
         buffer = io.BytesIO(); pic.save(buffer, format='PNG', optimize=True)
     return 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode('ascii')
 
@@ -430,40 +460,219 @@ def progress_stage(pct: float, state: str) -> tuple[str,str,str]:
 
 def render_mini_progress(status: dict,config: dict) -> None:
     _,_,pct=job_progress(status,config)
-    pin=max(0.,min(100.,pct))
+    key=f"{config.get('survey_id','')}/{status.get('started_at','')}"
+    previous=st.session_state.get('bm_mini_progress_pct',pct) if st.session_state.get('bm_mini_progress_key')==key else pct
+    st.session_state['bm_mini_progress_key']=key
+    st.session_state['bm_mini_progress_pct']=pct
+    previous=max(0.,min(100.,previous))
     happy=art_img('finish_happy.webp','width:36px;height:36px;object-fit:contain;','기쁨 캐릭터')
-    st.html(f"""<div style="padding:34px 28px 29px">
+    st.html(f"""<style>
+      @keyframes bmMiniFill{{from{{width:{previous:.2f}%}}to{{width:{pct:.2f}%}}}}
+      @keyframes bmMiniPin{{from{{left:{previous:.2f}%}}to{{left:{pct:.2f}%}}}}
+      @media(prefers-reduced-motion:reduce){{.bm-mini-animated{{animation:none!important}}}}
+      </style><div style="padding:34px 28px 29px">
       <div style="position:relative;height:11px;background:#203e4b;border-radius:20px">
-        <div style="width:{pct:.2f}%;height:100%;background:#2ac1bc;border-radius:20px"></div>
-        <div style="position:absolute;left:{pin:.2f}%;top:-27px;transform:translateX(-50%);width:36px;height:36px">{happy}</div>
-        <div style="position:absolute;left:{pin:.2f}%;top:18px;transform:translateX(-50%);font-size:12px;font-weight:800;color:#087d79">{pct:.1f}%</div>
+        <div class="bm-mini-animated" style="width:{pct:.2f}%;height:100%;background:#2ac1bc;border-radius:20px;animation:bmMiniFill 1.1s ease-out both"></div>
+        <div class="bm-mini-animated" style="position:absolute;left:{pct:.2f}%;top:-27px;transform:translateX(-50%);width:36px;height:36px;animation:bmMiniPin 1.1s ease-out both">{happy}</div>
+        <div class="bm-mini-animated" style="position:absolute;left:{pct:.2f}%;top:18px;transform:translateX(-50%);font-size:12px;font-weight:800;color:#087d79;animation:bmMiniPin 1.1s ease-out both">{pct:.1f}%</div>
       </div>
     </div>""")
 
-def render_progress(total: int, processed: int, saved: int, progress: float, state: str, elapsed: str='00m 00s', started_at: str='', ended_at: str='') -> None:
-    pct = max(0.,min(100.,progress*100)); title, _, name = progress_stage(pct,state)
-    rider = art_img(name,'width:70px;height:75px;object-fit:contain;','진행률 배민 라이더')
-    badge = '완료' if state=='completed' else ('중단' if state in ('failed','interrupted') else '조사 중')
-    start = json.dumps(str(started_at).replace(' ','T')); end = json.dumps(str(ended_at).replace(' ','T'))
-    active = 'true' if state in ('starting','running') else 'false'
+
+
+def render_progress(total: int, processed: int, saved: int, progress: float, state: str, elapsed: str='00m 00s', started_at: str='', ended_at: str='', previous_pct: float | None=None, store_name: str | None=None) -> None:
+    pct = max(0., min(100., progress * 100))
+    title, _, name = progress_stage(pct, state)
+    rider = art_img(name, 'max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;', '진행률 배민 라이더')
+    badge = '완료' if state == 'completed' else ('중단' if state in ('failed', 'interrupted') else ('대기' if state == 'idle' else '조사 중'))
+    started = json.dumps(str(started_at).replace(' ', 'T'))
+    ended = json.dumps(str(ended_at).replace(' ', 'T'))
+    active = 'true' if state in ('starting', 'running') else 'false'
+    previous = pct if previous_pct is None else max(0., min(100., float(previous_pct)))
+
+    if state == 'completed':
+        ticker_text = '🎉 이번 조사를 완료했어요! 수고 많았어요!'
+    elif state in ('failed', 'interrupted'):
+        ticker_text = '📋 저장된 조사 결과와 실행 로그를 확인해 주세요.'
+    elif store_name and state in ('starting', 'running'):
+        ticker_text = f'🍜 {store_name} 배달비를 확인하고 있어요! 🛵'
+    elif state in ('starting', 'running'):
+        ticker_text = '🛵 다음 대상처를 차근차근 조사하고 있어요!'
+    else:
+        ticker_text = '🩵 조사할 준비가 되면 Settings에서 시작해 주세요!'
+    ticker_html = escape(ticker_text)
+
     page = f"""<!doctype html><html lang="ko"><meta charset="UTF-8"><style>
-      *{{box-sizing:border-box}}body{{margin:0;font-family:'Noto Sans KR','Malgun Gothic',sans-serif;color:#193b38}}
-      .card{{height:339px;border:0;border-radius:18px;background:#fff;padding:21px 23px;box-shadow:0 5px 17px rgba(13,108,110,.075)}}
+      *{{box-sizing:border-box}}
+      body{{margin:0;background:transparent;color:#193b38;font-family:'Noto Sans KR','Malgun Gothic',sans-serif}}
+
+      .card{{height:500px;display:flex;flex-direction:column;overflow:hidden;padding:24px 27px;
+        border:1px solid #e6f0ee;border-radius:20px;background:#ffffff;
+        box-shadow:0 5px 17px rgba(13,108,110,.075)}}
+
       .top,.labels,.foot{{display:flex;align-items:center;justify-content:space-between;gap:12px}}
-      .top{{font-size:19px;font-weight:750}}.badge{{font-size:12px;color:#0c8f88;background:#e5f7f4;padding:6px 12px;border-radius:30px}}
-      .percent{{font-size:65px;font-weight:850;color:#098e88;text-align:center;letter-spacing:-3px;line-height:1.13;margin-top:14px}}
-      .time{{font-size:13px;color:#899c9b;text-align:center;margin-top:10px}}.labels{{margin-top:14px}}
-      .lane{{position:relative;height:83px;border-bottom:1px dashed #d5e9e6;margin-top:6px}}
-      .track{{height:12px;background:#e1efed;border-radius:20px;overflow:hidden}}.fill{{height:100%;background:linear-gradient(90deg,#62dfd6,#11b6ad);border-radius:20px}}
-      .foot{{font-size:12px;color:#718c88;margin-top:12px}}.stage{{font-weight:700}}
-    </style><div class="card"><div class="top"><span>실시간 조사 현황</span><span class="badge">{escape(badge)}</span></div>
-    <div class="percent">{pct:.1f}<span style="font-size:.43em">%</span></div><div class="time" id="bm-timer">{escape(elapsed)}</div>
-    <div class="labels"><span class="stage">{escape(title)}</span></div>
-    <div class="lane"><div style="position:absolute;bottom:0;left:clamp(0px,calc({pct:.2f}% - 35px),calc(100% - 70px));width:70px;height:75px">{rider}</div></div>
-    <div class="track"><div class="fill" style="width:{pct:.2f}%"></div></div>
-    <div class="foot"><span>완료 {processed:,}</span><span>남은 대상 {max(0,total-processed):,}</span><span>전체 {total:,}</span></div></div>
-    <script>const t0={start},t1={end},isRun={active};function tick(){{if(!t0)return;const s=Date.parse(t0),e=isRun?Date.now():Date.parse(t1||t0);if(!Number.isFinite(s)||!Number.isFinite(e))return;let ms=Math.max(0,e-s),n=Math.floor(ms/1000),h=Math.floor(n/3600),m=Math.floor(n%3600/60),sec=n%60,cs=Math.floor(ms%1000/10),p=x=>String(x).padStart(2,'0');document.getElementById('bm-timer').textContent=h?`${{h}}h ${{p(m)}}m ${{p(sec)}}s ${{p(cs)}}`:`${{p(m)}}m ${{p(sec)}}s ${{p(cs)}}`}}tick();setInterval(tick,50)</script></html>"""
-    component_html(page,height=346,scrolling=False)
+      .top{{font-size:19px;font-weight:750;letter-spacing:-.03em;color:#193b38}}
+
+      .badge{{font-size:12px;color:#0c8f88;background:#e5f7f4;
+        border:1px solid #d3f0ec;padding:6px 13px;border-radius:30px}}
+
+      .percent{{font-size:75px;font-weight:850;color:#098e88;text-align:center;
+        letter-spacing:-3px;line-height:1.1;margin-top:22px;
+        font-variant-numeric:tabular-nums}}
+
+      .time{{font-size:13px;color:#819a98;text-align:center;margin-top:7px;
+        font-variant-numeric:tabular-nums}}
+
+      .labels{{margin-top:22px;font-size:13px;color:#285c58}}
+      .stage{{font-weight:700}}
+
+      .progress-zone{{position:relative;height:111px;margin-top:13px;flex-shrink:0}}
+
+      .track{{position:absolute;left:38px;right:38px;bottom:0;height:12px;
+        background:#e1efed;border-radius:20px;overflow:hidden}}
+
+      .fill{{height:100%;width:{previous:.2f}%;
+        background:linear-gradient(90deg,#6ce1d9,#24bdb4);border-radius:20px}}
+
+      .rider{{position:absolute;bottom:10px;left:0;width:76px;height:100px;
+        display:flex;align-items:flex-end;justify-content:center;will-change:left}}
+
+      .rider img{{display:block;max-width:100%;max-height:100%;width:auto;height:auto}}
+
+      .foot{{font-size:12px;color:#718c88;margin-top:14px;
+        font-variant-numeric:tabular-nums}}
+
+      .ticker{{height:75px;flex-shrink:0;margin-top:auto;padding:11px 14px;
+        border-radius:13px;background:#eff9f7;border:1px solid #dcefeb;
+        overflow:hidden}}
+
+      .ticker-title{{display:flex;align-items:center;gap:8px;color:#148f87;
+        font-size:10px;font-weight:800;letter-spacing:.14em}}
+
+      .ticker-dot{{width:6px;height:6px;border-radius:50%;
+        background:#2ac1bc}}
+
+      .ticker-window{{overflow:hidden;margin-top:8px;white-space:nowrap;
+        color:#315f5b;font-size:12px}}
+
+      .ticker-line{{display:flex;width:max-content;animation:marquee 15s linear infinite}}
+      .ticker-item{{flex-shrink:0;padding-right:65px}}
+
+      @keyframes marquee{{to{{transform:translateX(-50%)}}}}
+
+      @media(prefers-reduced-motion:reduce){{
+        .ticker-line{{animation:none!important}}
+        .ticker-item + .ticker-item{{display:none}}
+      }}
+    </style>
+
+    <section class="card">
+      <div class="top">
+        <span>실시간 조사 현황</span>
+        <span class="badge">{escape(badge)}</span>
+      </div>
+
+      <div class="percent">
+        <span id="bm-current-pct">{previous:.1f}</span>
+        <span style="font-size:.43em">%</span>
+      </div>
+
+      <div class="time" id="bm-timer">{escape(elapsed)}</div>
+
+      <div class="labels">
+        <span class="stage">{escape(title)}</span>
+      </div>
+
+      <div class="progress-zone" id="bm-progress-zone">
+        <div class="rider" id="bm-rider">{rider}</div>
+        <div class="track">
+          <div class="fill" id="bm-fill"></div>
+        </div>
+      </div>
+
+      <div class="foot">
+        <span>완료 {processed:,}</span>
+        <span>남은 대상 {max(0,total-processed):,}</span>
+        <span>전체 {total:,}</span>
+      </div>
+
+      <div class="ticker" aria-label="실시간 조사 상태">
+        <div class="ticker-title">
+          <span class="ticker-dot"></span>LIVE SURVEY
+        </div>
+        <div class="ticker-window">
+          <div class="ticker-line" id="bm-ticker">
+            <span class="ticker-item">{ticker_html}</span>
+            <span class="ticker-item" aria-hidden="true">{ticker_html}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <script>
+      const t0={started},t1={ended},isRun={active};
+
+      function tick(){{
+        if(!t0)return;
+        const s=Date.parse(t0),e=isRun?Date.now():Date.parse(t1||t0);
+        if(!Number.isFinite(s)||!Number.isFinite(e))return;
+
+        let ms=Math.max(0,e-s),
+            n=Math.floor(ms/1000),
+            h=Math.floor(n/3600),
+            m=Math.floor(n%3600/60),
+            sec=n%60,
+            cs=Math.floor(ms%1000/10);
+
+        const p=x=>String(x).padStart(2,'0');
+
+        document.getElementById('bm-timer').textContent=h
+          ? `${{h}}h ${{p(m)}}m ${{p(sec)}}s ${{p(cs)}}`
+          : `${{p(m)}}m ${{p(sec)}}s ${{p(cs)}}`;
+      }}
+
+      tick();
+      setInterval(tick,50);
+
+      const startPct={previous:.4f},targetPct={pct:.4f};
+      const zone=document.getElementById('bm-progress-zone');
+      const rider=document.getElementById('bm-rider');
+      const fill=document.getElementById('bm-fill');
+      const counter=document.getElementById('bm-current-pct');
+
+      function show(v){{
+        const p=Math.max(0,Math.min(100,v));
+        fill.style.width=p+'%';
+        rider.style.left=(Math.max(0,zone.clientWidth-rider.clientWidth)*p/100)+'px';
+        counter.textContent=p.toFixed(1);
+      }}
+
+      const ease=t=>1-Math.pow(1-t,3);
+      show(startPct);
+
+      if(!window.matchMedia('(prefers-reduced-motion: reduce)').matches
+         && Math.abs(targetPct-startPct)>.001){{
+        const began=performance.now(),duration=1100;
+
+        function animate(now){{
+          const t=Math.min(1,(now-began)/duration);
+          show(startPct+(targetPct-startPct)*ease(t));
+          if(t<1)requestAnimationFrame(animate);
+        }}
+
+        requestAnimationFrame(animate);
+      }}else{{
+        show(targetPct);
+      }}
+
+      window.addEventListener('resize',()=>show(targetPct));
+      document.getElementById('bm-ticker').style.animationDelay=
+        '-'+(Date.now()%15000)+'ms';
+    </script></html>"""
+
+    component_html(page,height=506,scrolling=False)
+
+
 
 
 def render_log_box(log_text: str, height: int=420, scroll_key: str='latest') -> None:
@@ -586,6 +795,7 @@ def render_stop_control(job_dir: Path | None,state: str):
 
 
 
+
 def render_home(job_dir: Path | None):
     status=read_json(job_dir/'status.json') if job_dir else {}
     config=read_json(job_dir/'config.json') if job_dir else {}
@@ -593,35 +803,41 @@ def render_home(job_dir: Path | None):
     state=status.get('state','idle')
     result_file=survey_result_path(job_dir) if job_dir else None
 
+    job_key=job_dir.name if job_dir else 'idle'
+    if st.session_state.get('bm_progress_sample_job') != job_key:
+        previous_pct=pct
+    else:
+        previous_pct=st.session_state.get('bm_progress_sample_pct',pct)
+    st.session_state['bm_progress_sample_job']=job_key
+    st.session_state['bm_progress_sample_pct']=pct
+    store_name=(current_store_from_log(job_dir/'survey.log') if job_dir and state in ('running','starting') else None)
+
     with st.container(key='bm_home_grid'):
         left,right=st.columns([1.7,1],gap='medium')
-
         with left:
-            render_progress(total,processed,int(status.get('saved') or 0),pct/100,state,format_elapsed(status),status.get('started_at',''),status.get('ended_at',''))
-            render_stop_control(job_dir,state)
-            if not job_dir: st.caption('조사를 시작하려면 Settings에서 조사표와 조건을 선택하세요.')
-            if state=='failed': st.error('조사 오류가 발생했어요. 상세 로그를 확인해 주세요.')
-            if state=='interrupted': st.warning('조사가 중단됐어요. Settings에서 이어할 수 있어요.')
-
+            render_progress(total,processed,int(status.get('saved') or 0),pct/100,state,format_elapsed(status),status.get('started_at',''),status.get('ended_at',''),previous_pct=previous_pct,store_name=store_name)
         with right:
             review_count=0
             if result_file:
                 try: review_count=len(cached_review_rows(str(result_file),result_file.stat().st_mtime_ns))
                 except Exception: pass
-
             render_review_heading(review_count)
             if st.button('사람 확인 상세',icon=':material/fact_check:',width='stretch',key='open_review_home'):
                 st.session_state['bm_nav_pending']='사람 확인'
                 st.rerun()
-
             excel_ready=bool(result_file and state in ('completed','failed','interrupted'))
             render_download_heading(ready=excel_ready)
             st.download_button('Excel 결과 다운로드',data=result_file.read_bytes() if excel_ready else b'',file_name=result_file.name if excel_ready else 'result.xlsx',mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',type='primary',disabled=not excel_ready,icon=':material/download:',width='stretch',key='excel_home')
 
-    st.markdown('**최근 실행 로그**')
-    log=tail_log(job_dir/'survey.log',max_lines=65,max_bytes=25000) if job_dir else '조사를 시작하면 실행 기록이 표시됩니다.'
-    st.html(f'<div style="height:clamp(170px,25vh,310px);overflow-y:auto;border-radius:14px;background:#142333;color:#e0ebed;padding:14px 18px"><pre style="white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 Consolas,monospace;margin:0">{escape(log)}</pre></div>')
+    # B안: 안전 중단 및 최근 실행 로그를 두 열 아래에 전체 너비로 표시
+    render_stop_control(job_dir,state)
+    if not job_dir: st.caption('조사를 시작하려면 Settings에서 조사표와 조건을 선택하세요.')
+    if state=='failed': st.error('조사 오류가 발생했어요. 상세 로그를 확인해 주세요.')
+    if state=='interrupted': st.warning('조사가 중단됐어요. Settings에서 이어할 수 있어요.')
 
+    st.markdown('**최근 실행 로그**')
+    log=tail_log(job_dir/'survey.log',max_lines=250,max_bytes=80000) if job_dir else '조사를 시작하면 실행 기록이 표시됩니다.'
+    render_log_box(log,height=440,scroll_key='home_'+job_key)
 
 
 def render_review_page(job_dir: Path | None):
@@ -1005,31 +1221,113 @@ if st.session_state.get('bm_nav') not in ('Home','Settings','Results','사람 �
 page=st.session_state['bm_nav']; CONTACT_EMAIL=os.environ.get('BAEMIN_CONTACT_EMAIL','').strip()
 
 if 'bm_side_compact' not in st.session_state: st.session_state['bm_side_compact']=False
+if 'bm_results_open' not in st.session_state: st.session_state['bm_results_open']=True
 small=st.session_state['bm_side_compact']
-side_width=74 if small else 244
+results_open=st.session_state['bm_results_open']
+side_width=72 if small else 244
 
+# The same aligned icon/label grid is used for every top-level menu item.
+# The compact rail is styled separately, so selected backgrounds never shrink over icons.
 st.html(f"""<style>
 section[data-testid="stSidebar"]{{width:{side_width}px!important;min-width:{side_width}px!important;max-width:{side_width}px!important}}
 section[data-testid="stSidebar"],section[data-testid="stSidebar"]>div{{background:#0b2030!important;color:#dce8ee!important}}
-section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"]{{padding:0 11px!important}}
-section[data-testid="stSidebar"] .stButton button{{display:flex!important;justify-content:flex-start!important;align-items:center!important;gap:11px!important;min-height:41px!important;padding:0 12px!important;border:0!important;border-radius:8px!important;box-shadow:none!important;font-size:13px!important;color:#bbced8!important}}
-section[data-testid="stSidebar"] .stButton button[kind="tertiary"]{{background:transparent!important}}
-section[data-testid="stSidebar"] .stButton button[kind="primary"]{{background:{'#123244' if small else '#24495f'}!important;color:white!important;box-shadow:{'none' if small else 'inset 3px 0 #36d4c6'}!important}}
-section[data-testid="stSidebar"] .stButton button:hover{{background:#1a3b50!important;color:white!important}}
-section[data-testid="stSidebar"] .stButton button p{{text-align:left!important;margin:0!important}}
+section[data-testid="stSidebar"] [data-testid="stSidebarUserContent"]{{padding:0 {'0px' if small else '15px'}!important}}
 section[data-testid="stSidebar"] [data-testid="stSidebarCollapseButton"]{{display:none!important}}
-.st-key-bm_results_sub{{border-left:1px solid #375267;margin-left:{'0' if small else '15px'};padding-left:{'0' if small else '9px'}}}
-.bm-side-logo{{padding:1px 1px 12px;display:flex;align-items:center;gap:10px;justify-content:{'center' if small else 'flex-start'};min-height:{'40px' if small else '58px'}}}
-.bm-side-logo img{{max-width:100%;width:{'32px' if small else '40px'};max-height:{'36px' if small else '44px'};object-fit:contain}}.bm-side-brand{{font-size:23px;font-weight:850;letter-spacing:.055em;color:#f3fffe}}
-.bm-side-category{{font-size:10px;font-weight:700;letter-spacing:.14em;color:#8ba5b1;margin:13px 8px 7px}}
-.bm-side-footer{{position:fixed;bottom:22px;left:{'17px' if small else '24px'};display:flex;gap:19px}}
+/* Reset Streamlit's button spacing, then align icon and text to explicit columns. */
+section[data-testid="stSidebar"] .st-key-nav_home button,
+section[data-testid="stSidebar"] .st-key-nav_settings button,
+section[data-testid="stSidebar"] .st-key-nav_results button,
+section[data-testid="stSidebar"] .st-key-nav_logs button,
+section[data-testid="stSidebar"] .st-key-nav_review button{{
+  display:grid!important;grid-template-columns:20px minmax(0,1fr)!important;
+  place-items:center start!important;column-gap:12px!important;
+  justify-content:start!important;align-items:center!important;
+  width:100%!important;height:43px!important;min-height:43px!important;
+  padding:0 12px!important;box-sizing:border-box!important;
+  border:0!important;border-radius:9px!important;box-shadow:none!important;
+  background:transparent!important;color:#c7d8e0!important;font-size:13px!important;
+  font-family:'Noto Sans KR','Malgun Gothic',sans-serif!important;
+  font-weight:500!important;position:relative!important;
+}}
+section[data-testid="stSidebar"] .st-key-nav_home button > :first-child,
+section[data-testid="stSidebar"] .st-key-nav_settings button > :first-child,
+section[data-testid="stSidebar"] .st-key-nav_results button > :first-child,
+section[data-testid="stSidebar"] .st-key-nav_logs button > :first-child,
+section[data-testid="stSidebar"] .st-key-nav_review button > :first-child{{
+  grid-column:1!important;justify-self:center!important;
+  min-width:20px!important;max-width:20px!important;margin:0!important;
+}}
+section[data-testid="stSidebar"] .st-key-nav_home button [data-testid="stMarkdownContainer"],
+section[data-testid="stSidebar"] .st-key-nav_settings button [data-testid="stMarkdownContainer"],
+section[data-testid="stSidebar"] .st-key-nav_results button [data-testid="stMarkdownContainer"],
+section[data-testid="stSidebar"] .st-key-nav_logs button [data-testid="stMarkdownContainer"],
+section[data-testid="stSidebar"] .st-key-nav_review button [data-testid="stMarkdownContainer"]{{
+  grid-column:2!important;justify-self:stretch!important;min-width:0!important;
+  width:100%!important;text-align:left!important;margin:0!important;
+}}
+section[data-testid="stSidebar"] .st-key-nav_home button p,
+section[data-testid="stSidebar"] .st-key-nav_settings button p,
+section[data-testid="stSidebar"] .st-key-nav_results button p,
+section[data-testid="stSidebar"] .st-key-nav_logs button p,
+section[data-testid="stSidebar"] .st-key-nav_review button p{{margin:0!important;text-align:left!important;white-space:nowrap!important}}
+section[data-testid="stSidebar"] .st-key-nav_home button:hover,
+section[data-testid="stSidebar"] .st-key-nav_settings button:hover,
+section[data-testid="stSidebar"] .st-key-nav_results button:hover,
+section[data-testid="stSidebar"] .st-key-nav_logs button:hover,
+section[data-testid="stSidebar"] .st-key-nav_review button:hover{{background:#193b4c!important;color:#fff!important}}
+/* Expanded selection: one consistent left accent, not a different centered icon. */
+section[data-testid="stSidebar"] .st-key-nav_home button[kind="primary"],
+section[data-testid="stSidebar"] .st-key-nav_settings button[kind="primary"],
+section[data-testid="stSidebar"] .st-key-nav_results button[kind="primary"]{{
+  background:#24495e!important;color:#fff!important;
+  box-shadow:inset 3px 0 #2ac1bc!important;font-weight:700!important;
+}}
+/* The parent stays recognizable when one of its subpages is selected. */
+section[data-testid="stSidebar"] .st-key-nav_logs button,
+section[data-testid="stSidebar"] .st-key-nav_review button{{height:37px!important;min-height:37px!important;font-size:12px!important;color:#aabec7!important}}
+section[data-testid="stSidebar"] .st-key-nav_logs button[kind="primary"],
+section[data-testid="stSidebar"] .st-key-nav_review button[kind="primary"]{{
+  background:#204153!important;color:#c7fff8!important;box-shadow:none!important;
+}}
+/* A real visual hierarchy: Results row, followed by an indented guide and branch joints. */
+.bm-side-rule{{height:1px;background:#294455;margin:12px 5px 9px}}
+.st-key-bm_results_sub{{position:relative!important;margin:2px 0 3px 30px!important;
+  padding:1px 0 1px 12px!important;border-left:1px solid #587080!important}}
+.st-key-bm_results_sub .st-key-nav_logs,
+.st-key-bm_results_sub .st-key-nav_review{{position:relative!important}}
+.st-key-bm_results_sub .st-key-nav_logs:before,
+.st-key-bm_results_sub .st-key-nav_review:before{{content:"";position:absolute;
+  left:-13px;top:18px;width:11px;border-top:1px solid #587080;pointer-events:none}}
+.st-key-bm_results_sub .st-key-nav_review:after{{content:"";position:absolute;left:-13px;
+  top:19px;bottom:0;background:#0b2030;width:2px;pointer-events:none}}
+/* Parent chevron is completely separate from the icon and text columns. */
+{'section[data-testid="stSidebar"] .st-key-nav_results button::after{content:"▴";position:absolute;right:11px;top:9px;font-size:15px;color:#8bb0b7}' if results_open and not small else 'section[data-testid="stSidebar"] .st-key-nav_results button::after{content:"▾";position:absolute;right:11px;top:9px;font-size:15px;color:#8bb0b7}' if not small else ''}
+.bm-side-logo{{box-sizing:border-box;width:100%;padding:1px 0 13px;display:flex;align-items:center;gap:10px;
+  justify-content:{'center' if small else 'flex-start'};min-height:{'39px' if small else '58px'}}}
+.bm-side-logo img{{display:block;flex:none;width:{'24px' if small else '40px'};height:{'28px' if small else '44px'};object-fit:contain;object-position:center}}
+.bm-side-brand{{font-size:23px;font-weight:850;letter-spacing:.05em;color:#f3fffe}}
+.bm-side-footer{{position:fixed;bottom:22px;left:{'0' if small else '25px'};width:{f'{side_width}px' if small else 'auto'};display:flex;justify-content:{'center' if small else 'flex-start'};gap:19px}}
 .bm-side-footer a{{color:#aebfcc;text-decoration:none;font-size:12px;display:flex;align-items:center;gap:6px}}
 .bm-side-footer svg{{width:16px;height:16px}}
-.st-key-sidebar_toggle{{display:flex;justify-content:flex-end;margin-top:0!important;margin-bottom:-2px!important}}
-section[data-testid="stSidebar"] .st-key-sidebar_toggle button{{width:29px!important;min-height:28px!important;height:28px!important;padding:0!important;justify-content:center!important}}
-.st-key-sidebar_toggle button p{{display:none!important}}
-{'section[data-testid="stSidebar"] .stButton button{justify-content:center!important;padding:0!important;position:relative!important}section[data-testid="stSidebar"] .stButton button[kind="primary"]::after{content:"";position:absolute;right:5px;top:5px;width:5px;height:5px;border-radius:50%;background:#36d4c6}' if small else ''}
-{'section[data-testid="stSidebar"] .stButton button p,.bm-side-category,.bm-side-footer span{display:none!important}' if small else ''}
+{'section[data-testid="stSidebar"] .bm-side-footer span{display:none!important}section[data-testid="stSidebar"] .bm-side-footer a{display:flex!important;align-items:center!important;justify-content:center!important;width:32px;height:32px}' if small else ''}
+/* Compact mode: each actual Streamlit widget root occupies the SAME full rail width.
+   Center the wrapper first; margin:auto on the button alone is not reliable. */
+{'section[data-testid="stSidebar"] .st-key-nav_home,section[data-testid="stSidebar"] .st-key-nav_settings,section[data-testid="stSidebar"] .st-key-nav_results{display:flex!important;align-items:center!important;justify-content:center!important;width:100%!important;margin:0!important;padding:0!important;min-width:0!important}section[data-testid="stSidebar"] .st-key-nav_home [data-testid="stButton"],section[data-testid="stSidebar"] .st-key-nav_settings [data-testid="stButton"],section[data-testid="stSidebar"] .st-key-nav_results [data-testid="stButton"]{display:flex!important;align-items:center!important;justify-content:center!important;width:100%!important;padding:0!important;margin:0!important}section[data-testid="stSidebar"] .bm-side-logo{margin-inline:auto!important}section[data-testid="stSidebar"] .st-key-sidebar_toggle{padding-right:10px!important}' if small else ''}
+/* Compact rail: fixed 42×42 hit area; highlight is a short underline UNDER the icon. */
+{'section[data-testid="stSidebar"] .st-key-nav_home button,section[data-testid="stSidebar"] .st-key-nav_settings button,section[data-testid="stSidebar"] .st-key-nav_results button{width:42px!important;flex:0 0 42px!important;height:42px!important;min-height:42px!important;grid-template-columns:1fr!important;justify-items:center!important;place-items:center!important;column-gap:0!important;padding:0!important;margin:0!important;border-radius:11px!important;background:transparent!important;box-shadow:none!important}' if small else ''}
+{'section[data-testid="stSidebar"] .st-key-nav_home button[kind="primary"],section[data-testid="stSidebar"] .st-key-nav_settings button[kind="primary"],section[data-testid="stSidebar"] .st-key-nav_results button[kind="primary"]{background:#173a4c!important;box-shadow:none!important;color:#35d6c9!important}' if small else ''}
+{'section[data-testid="stSidebar"] .st-key-nav_home button[kind="primary"]::after,section[data-testid="stSidebar"] .st-key-nav_settings button[kind="primary"]::after,section[data-testid="stSidebar"] .st-key-nav_results button[kind="primary"]::after{content:"";position:absolute;left:13px;bottom:3px;top:auto;right:auto;width:16px;height:2px;border:0;border-radius:2px;background:#2ac1bc}' if small else ''}
+{'section[data-testid="stSidebar"] .st-key-nav_home button [data-testid="stMarkdownContainer"],section[data-testid="stSidebar"] .st-key-nav_settings button [data-testid="stMarkdownContainer"],section[data-testid="stSidebar"] .st-key-nav_results button [data-testid="stMarkdownContainer"]{display:none!important}' if small else ''}
+{'section[data-testid="stSidebar"] .st-key-nav_home button > :first-child,section[data-testid="stSidebar"] .st-key-nav_settings button > :first-child,section[data-testid="stSidebar"] .st-key-nav_results button > :first-child{grid-column:1!important;justify-self:center!important}' if small else ''}
+/* The toggle belongs to the top right, never adds a full-width navigation row. */
+.st-key-sidebar_toggle{{display:flex!important;justify-content:flex-end!important;
+  margin:0 0 2px!important;padding:0!important}}
+section[data-testid="stSidebar"] .st-key-sidebar_toggle button{{width:29px!important;
+  min-height:28px!important;height:28px!important;padding:0!important;
+  display:flex!important;justify-content:center!important;align-items:center!important;
+  border:0!important;box-shadow:none!important;border-radius:7px!important;
+  color:#d1e9e6!important;background:transparent!important}}
+section[data-testid="stSidebar"] .st-key-sidebar_toggle button p{{display:none!important}}
 </style>""")
 
 with st.sidebar:
@@ -1039,31 +1337,38 @@ with st.sidebar:
 
     logo=art('sidebar_logo.png')
     if logo:
-        brand_text = '' if small else '<span class="bm-side-brand">BAEMIN</span>'
+        brand_text='' if small else '<span class="bm-side-brand">BAEMIN</span>'
         st.html(f'<div class="bm-side-logo"><img src="{logo}" alt="배민 로고">{brand_text}</div>')
-    else: st.html('<div class="bm-side-logo" style="font-size:18px;font-weight:900;color:#2ac1bc">BAEMIN</div>')
+    else:
+        st.html(f'<div class="bm-side-logo" style="font-size:{16 if small else 23}px;font-weight:850;color:#2ac1bc">{"BM" if small else "BAEMIN"}</div>')
 
-    def nav(label,icon,key,target):
+    def nav(label, icon, key, target, child=False):
+        # Results is the parent of both detailed pages. Expanded submenu items
+        # remain separate navigation targets and retain their active state.
         selected = page==target or (target=='Results' and page in ('상세 로그','사람 확인'))
         if st.button(label,icon=icon,key=key,type='primary' if selected else 'tertiary',width='stretch'):
-            if small and target=='Results': st.session_state['bm_side_compact']=False
-            else: st.session_state['bm_nav']=target
+            if target=='Results':
+                if small:
+                    st.session_state['bm_side_compact']=False
+                    st.session_state['bm_results_open']=True
+                else:
+                    st.session_state['bm_results_open']=not st.session_state['bm_results_open']
+            st.session_state['bm_nav']=target
             st.rerun()
 
     nav('Home',':material/home:','nav_home','Home')
     nav('Settings',':material/settings:','nav_settings','Settings')
-    if not small: st.html('<div class="bm-side-category">RESULTS</div>')
+    if not small: st.html('<div class="bm-side-rule" aria-hidden="true"></div>')
     nav('Results',':material/assessment:','nav_results','Results')
 
-    if not small:
+    if not small and results_open:
         with st.container(key='bm_results_sub'):
-            nav('상세 로그',':material/description:','nav_logs','상세 로그')
-            nav('사람 확인',':material/fact_check:','nav_review','사람 확인')
+            nav('상세 로그',':material/description:','nav_logs','상세 로그',child=True)
+            nav('사람 확인',':material/fact_check:','nav_review','사람 확인',child=True)
 
     github='https://github.com/shinwltn/baemin-delivery-fee-automation'
     email=f'<a href="mailto:{escape(CONTACT_EMAIL,quote=True)}" title="Email"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 7 10 6 10-6"/></svg><span>Email</span></a>' if CONTACT_EMAIL else ''
-    st.html(f'<div class="bm-side-footer"><a href="{github}" target="_blank" title="GitHub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m8 8-4 4 4 4m8-8 4 4-4 4M14 4l-4 16"/></svg><span>GitHub</span></a>{email}</div>')
-
+    st.html(f'<div class="bm-side-footer"><a href="{github}" target="_blank" aria-label="GitHub"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m8 8-4 4 4 4m8-8 4 4-4 4M14 4l-4 16"/></svg><span>GitHub</span></a>{email}</div>')
 
 render_header(home=page=='Home')
 active_dir,_=active_job(); job_dir=recent_job_dir(active_dir); running=active_dir is not None
@@ -1122,6 +1427,5 @@ def render_site_footer(home: bool) -> None:
       .bm-footer-dot{{color:#c1d6d2}}
       .bm-footer-note{{font-size:10px;color:#9ab0ab;margin-top:12px}}
     </style>""")
-
 
 render_site_footer(home=page=='Home')
