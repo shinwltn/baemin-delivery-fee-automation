@@ -1467,15 +1467,25 @@ def compare_and_write(ws, store, delivery=None, information=None, menu_exists=No
     # 7. 변동사항
     comparison_complete = delivery_ok and information_ok and not address_review
     change_type = ""
-    if comparison_complete and fee_changed:
-        if address_changed:
-            change_type = "주소"
-        elif min_changed:
-            change_type = "품질규격"
-        elif owner_changed:
-            change_type = "기타"
-        else:
-            change_type = "가격"
+    if comparison_complete:
+        delivery_statuses = (store_status, saver_status, one_status)
+        has_new = "신규" in delivery_statuses
+        has_removed = "탈락" in delivery_statuses
+        if has_new and has_removed:
+            change_type = "신규,탈락"
+        elif has_new:
+            change_type = "신규"
+        elif has_removed:
+            change_type = "탈락"
+        elif fee_changed:
+            if address_changed:
+                change_type = "주소"
+            elif min_changed:
+                change_type = "품질규격"
+            elif owner_changed:
+                change_type = "기타"
+            else:
+                change_type = "가격"
     notes = []
     if not target_changed:
         if delivery_ok and min_changed:
